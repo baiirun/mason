@@ -1,0 +1,21 @@
+{
+  "name": "@mason/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "start": "tsx src/server.ts",
+    "cli": "tsx src/cli.ts"
+  },
+  "dependencies": {
+    "@mason/core": "*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "@types/ws": "^8.5.13",
+    "tsx": "^4.19.2"
+  }
+}
