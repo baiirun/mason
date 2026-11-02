@@ -87,6 +87,18 @@ Declares a write the view or an agent can trigger.
 
 After the call, the platform refetches what the action invalidates and notifies other blocks on the same topics. Implemented.
 
+#### Event actions (Planned)
+
+An action can emit an event instead of calling a tool. It's how a button in a view, or an agent, starts automation work ("investigate this PR", "draft a fix").
+
+```ts
+block.action("investigate", { emits: "investigate_pr" });
+```
+
+The caller's `input` becomes the event's payload (JSON, at most 16 KB). The event is delivered like any other (see [Events and automations](#events-and-automations-planned)), with `cause` set to whoever called the action: `user:<id>` for a click, `agent:<session>` or `automation:<id>/run:<id>` for a tool call. The action resolves immediately with `{ eventId }`; it doesn't wait for automation runs to start.
+
+Use a tool action for a direct, single write (close a PR). Use an event action for work an agent should do: multi-step, judgment calls, or producing something.
+
 ### `block.describe(fn: () => string)`
 
 The one line agents see about the block: what it shows right now. Recomputed with `setup`. Implemented.
@@ -123,7 +135,8 @@ Runs in a `sandbox="allow-scripts"` iframe on a separate origin with CSP `defaul
 | `errors` | `Record<string, string>` | Per query, when `status` is `error`. |
 | `state` | `Record<string, any>` | Block state. |
 | `setState(key, value)` | | Writes state; `setup` re-runs. |
-| `act(name, input, { confirmed? })` | `Promise` | Runs an action. Rejects with the server's error. |
+| `act(name, input, { confirmed? })` | `Promise` | Runs an action. Resolves with the tool's result, or `{ eventId }` for an event action (Planned). Rejects with the server's error. The SDK attaches a client id, so a double click or retry runs the action once. |
+| `events` | `BlockEvent[]` | Planned. The block's recent events, newest first: `{ id, name, cause, at, runs: { automation, runId, status }[] \| null }`. `runs` is `null` until the router reports, and `[]` if no automation handles the event. |
 | `refresh()` | | Refetches every query. |
 
 Exports: `Section`, `Stat`, `Badge`, `Table` (themed components); `useState`, `useMemo`, `useEffect`, `useRef`, `useCallback`. A view that throws renders an error in place and reports it to the host. Implemented.
@@ -166,6 +179,16 @@ block.on handler (isolate)  →  Block DO  →  Queue  →  trigger router  → 
 - **At-least-once.** The router deduplicates by `id`. Order across events is not guaranteed; sessions should re-read the block (`block_read`) rather than rely on order.
 - **Loop guard.** A session's Mason tool calls (`block_set_state`, `block_action`, canvas ops) carry its run id; the Block DO records it as the cause of the next reconcile, and events from that reconcile inherit it. The router doesn't start an automation from its own runs' effects, and stops chains of automation-caused events after 3 hops.
 - **Untrusted content.** Payload text can come from upstream data (PR titles, messages). Sessions receive the envelope marked as data, not instructions.
+
+### Run feedback
+
+When the trigger router starts runs for an event, it reports them back to the Block DO (`POST /api/blocks/:id/events/:eventId/runs` with `{ runs: [{ automation, runId }] }`, an internal endpoint). The Block DO adds them to the event log and pushes an `event` message to viewers, so a view can show "Investigation started", link to the session, or say "No automation handles this yet" when `runs` is empty. Run status updates arrive the same way.
+
+### Guards for event actions
+
+- **One emit per action call.** The client id deduplicates double clicks and retries.
+- **Rate limit** per user, block and event (default 10 per minute). Over the limit, the action is refused with an error the view can show.
+- **Validation.** The input is user-supplied: checked as JSON with a size cap, and delivered to sessions marked as data.
 
 ### Sessions and blocks
 

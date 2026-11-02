@@ -56,6 +56,7 @@ Each applied op increments the canvas `seq`, is appended to an op log (last 200)
 | `POST /api/blocks/:id/state` | `{ key, value }` | `{ ok: true }` | Implemented |
 | `POST /api/blocks/:id/actions/:name` | `{ input, confirmed? }` | `{ result }` | Implemented |
 | `POST /api/blocks/:id/refresh` | | `{ ok: true }` | Implemented |
+| `POST /api/blocks/:id/events/:eventId/runs` | `{ runs: [{ automation, runId, status? }] }` | `{ ok: true }`. Internal: called by the trigger router. | Planned |
 | `GET /api/blocks` | | `[{ id, module, version, props, rect, client }]` (compatibility view) | Implemented |
 | `POST /api/seed` | | Publishes every module at head; opens `canvas.json` on an empty canvas. Dev only. | Implemented |
 
@@ -117,9 +118,10 @@ Server → client:
 | `{ type: "state", offset, key, value }` | State changed. |
 | `{ type: "meta", offset, describe, errors, actions }` | Describe line, errors or actions changed. |
 | `{ type: "version", offset, versionId, client }` | The block moved to a new version. |
-| `{ type: "ack", id, ok, result? , error? }` | Reply to an action. Not in the offset sequence. |
+| `{ type: "event", offset, event: { id, name, cause, at, runs } }` | Planned. An event was emitted, or the router reported runs for it. |
+| `{ type: "ack", id, ok, result? , error? }` | Reply to an action. `result` is `{ eventId }` for an event action. Not in the offset sequence. |
 
-Client → server: `{ type: "action", id, name, input, confirmed? }`, `{ type: "setState", key, value }`, `{ type: "refresh" }`.
+Client → server: `{ type: "action", id, name, input, confirmed?, clientId? }`, `{ type: "setState", key, value }`, `{ type: "refresh" }`. `clientId` (Planned) makes an action idempotent: a repeat with the same `clientId` returns the first result.
 
 Resume: with `?since=<offset>`, the DO replays the messages after that offset if it still has them (last 200, in memory), else sends a snapshot. A connected socket counts as an observer: polling runs only while at least one is open. Implemented.
 
