@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const APP = fileURLToPath(new URL("..", import.meta.url));
-const ROOT = join(APP, ".git-data");
+const ROOT = process.env.GIT_DATA ?? join(APP, ".git-data"); // override to run an isolated copy (e.g. for tests)
 const PORT = Number(process.env.GIT_PORT ?? 8788);
 const REPO = "workspace";
 

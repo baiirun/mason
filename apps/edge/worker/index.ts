@@ -2,8 +2,9 @@
 // ingress Worker, the git remote, the sandbox origin and the app.
 import FRAME_SDK from "./generated/frame-sdk.js";
 import { CompileError } from "./compile";
-import { OpError, type CanvasOp } from "./canvas-do";
-import { blockStub, canvas, fanout, gateway, registry, type Env } from "./env";
+import type { CanvasOp, CanvasSnapshot } from "./canvas-do";
+import { blockStub, canvas, gateway, registry, type Env } from "./env";
+import { fanout, makeRuntime, runForCaller } from "./runtime";
 import { handleGit, publishCommit } from "./git";
 import { frameShell, hostPage } from "./pages";
 import { repo } from "./repo";
@@ -79,7 +80,8 @@ export default {
       if (path === "/api/modules" && req.method === "GET") return json(await registry(env).listModules());
       // Compatibility view of the canvas for scripts: one row per block.
       if (path === "/api/blocks" && req.method === "GET") {
-        const snap = await canvas(env).snapshot();
+        // RPC result types for nested records instantiate too deeply for tsc; the shape is CanvasSnapshot.
+        const snap = (await canvas(env).snapshot()) as unknown as CanvasSnapshot;
         return json(snap.blocks.map((b) => ({ id: b.id, module: b.module, version: b.versionId, props: b.props, rect: b.rect, client: b.client })));
       }
       if (parts[0] === "api" && parts[1] === "blocks" && parts[2]) {
@@ -105,7 +107,7 @@ export default {
       if (req.method === "POST" && path === "/webhook/github") {
         const change = await req.json<any>();
         const { pr, topics } = await gateway(env).simulateUpstream(change);
-        const woke = await fanout(env, topics);
+        const woke = await runForCaller(makeRuntime(env), fanout(topics));
         return json({ pr, topics, woke });
       }
       return new Response("not found", { status: 404 });

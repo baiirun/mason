@@ -1,5 +1,6 @@
 // End-to-end checks against a running `npm run dev` (wrangler dev on :8787).
 import { createHash } from "node:crypto";
+import { request } from "node:http";
 
 const BASE = process.env.BASE ?? "http://localhost:8787";
 const WS_BASE = BASE.replace(/^http/, "ws");
@@ -110,6 +111,24 @@ check("frame CSP blocks all network", csp.includes("connect-src 'none'") && csp.
 const bundle = await fetch(`${BASE}/bundles/client/${b.client.hex}.js`).then((r) => r.text());
 const sri = "sha256-" + createHash("sha256").update(bundle).digest("base64");
 check("client bundle matches its integrity hash", sri === b.client.sri);
+
+// A socket for a block that doesn't exist is refused cleanly.
+// (fetch() won't send Upgrade headers, so use a raw HTTP request.)
+const missingStatus = await new Promise((resolve) => {
+  const req = request(`${BASE}/api/blocks/does-not-exist/ws`, { headers: { Upgrade: "websocket", Connection: "Upgrade", "Sec-WebSocket-Version": "13", "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==" } });
+  req.on("response", (res) => resolve(res.statusCode));
+  req.on("upgrade", (res, socket) => (socket.destroy(), resolve(res.statusCode)));
+  req.on("error", (e) => resolve(e.message));
+  req.end();
+});
+check("a socket for a missing block gets 404", missingStatus === 404, String(missingStatus));
+
+// Concurrent canvas ops are applied one at a time: no two opens land in the same spot.
+const seqBefore = (await get("/api/canvas")).seq;
+await Promise.all([1, 2, 3, 4, 5, 6].map((i) => post("/api/canvas/ops", { type: "open", id: `race-${i}`, module: "oncall-desk", props: { repo: "inspect/web" } })));
+const raced = (await get("/api/canvas")).blocks.filter((b) => b.id.startsWith("race-"));
+check("concurrent opens all apply, in distinct places", raced.length === 6 && new Set(raced.map((b) => `${b.rect.x},${b.rect.y}`)).size === 6 && (await get("/api/canvas")).seq === seqBefore + 6);
+for (const b of raced) await post("/api/canvas/ops", { type: "close", id: b.id });
 
 // The compiler's gate is exercised through git pushes in smoke-git.mjs.
 

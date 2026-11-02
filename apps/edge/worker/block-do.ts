@@ -2,11 +2,16 @@
 // results (keyed rows), state, the outgoing change stream with offsets, poll
 // alarms, and the sockets of whoever is viewing. The block's own code runs in a
 // Worker Loader isolate with no bindings and no network; this DO does all I/O.
+//
+// The work runs on Effect: one semaphore serializes changes (webhooks, alarms,
+// actions and state edits can arrive while a refetch is in flight), tool calls
+// get timeouts and retries, and failures are typed.
 import { DurableObject } from "cloudflare:workers";
-import { fanout, gateway, registry, type Env } from "./env";
-import { loadIsolate } from "./isolate";
+import { Effect, Semaphore } from "effect";
+import type { Env } from "./env";
 import { topicsFor, type Grant } from "./gateway-do";
 import type { BlockRecord, ModuleVersion } from "./registry-do";
+import { callTool, fanout, Isolates, makeRuntime, NotFound, Refused, Registry, runForCaller, type Runtime } from "./runtime";
 
 interface QuerySpec {
   name: string;
@@ -39,6 +44,7 @@ interface QueryValue {
   key?: string;
 }
 type Op = { op: "insert" | "update" | "delete"; key: string; value?: unknown };
+type Values = Record<string, QueryValue>;
 
 const LOG_SIZE = 200;
 const MAX_PASSES = 5; // dependent queries settle within a few evaluations
@@ -57,68 +63,76 @@ function diff(oldRows: any[], newRows: any[], key: string): Op[] {
   return ops;
 }
 
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b);
+
 export class BlockDO extends DurableObject<Env> {
   private offset = 0;
   private log: { offset: number; [k: string]: unknown }[] = [];
   private ev: Evaluation | null = null;
   private versionCache: ModuleVersion | null = null;
-  // Webhooks, alarms, actions and state edits can arrive while a refetch is in
-  // flight; run them one at a time so values and offsets stay consistent.
-  private chain: Promise<unknown> = Promise.resolve();
+  private readonly rt: Runtime;
+  private readonly lock = Semaphore.makeUnsafe(1);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+    this.rt = makeRuntime(env);
     ctx.blockConcurrencyWhile(async () => {
       this.offset = (await ctx.storage.get<number>("offset")) ?? 0;
     });
   }
 
-  private serial<T>(fn: () => Promise<T>): Promise<T> {
-    const run = this.chain.then(fn, fn);
-    this.chain = run.catch(() => {});
-    return run;
+  // ---- effects at the edges --------------------------------------------------
+
+  /** Run for an RPC or socket caller; typed failures arrive as an Error with the failure's message. */
+  private run<A, E extends { message: string }>(eff: Effect.Effect<A, E, any>) {
+    return runForCaller(this.rt, eff);
+  }
+
+  /** One change at a time, so values and offsets stay consistent. */
+  private locked<A, E, R>(eff: Effect.Effect<A, E, R>) {
+    return this.lock.withPermits(1)(eff);
+  }
+
+  private get<T>(key: string) {
+    return Effect.promise(() => this.ctx.storage.get<T>(key));
+  }
+  private put(key: string, value: unknown) {
+    return Effect.promise(() => this.ctx.storage.put(key, value));
   }
 
   // ---- records ---------------------------------------------------------------
 
-  private async record() {
-    const rec = await this.ctx.storage.get<BlockRecord>("record");
-    if (!rec) throw new Error("block not initialized");
-    return rec;
-  }
+  private readonly record = Effect.flatMap(
+    Effect.promise(() => this.ctx.storage.get<BlockRecord>("record")),
+    (rec) => (rec ? Effect.succeed(rec) : Effect.fail(new NotFound({ message: "block not initialized" }))),
+  );
 
-  private async version() {
-    const rec = await this.record();
-    if (this.versionCache?.id !== rec.versionId) {
-      this.versionCache = await registry(this.env).getVersion(rec.versionId);
-      if (!this.versionCache) throw new Error(`version ${rec.versionId} not found`);
-    }
-    return this.versionCache;
-  }
+  private readonly version = Effect.gen({ self: this }, function* () {
+    const rec = yield* this.record;
+    if (this.versionCache?.id !== rec.versionId) this.versionCache = yield* (yield* Registry).getVersion(rec.versionId);
+    return this.versionCache!;
+  });
 
-  private async values() {
-    return (await this.ctx.storage.get<Record<string, QueryValue>>("values")) ?? {};
-  }
+  private readonly values = Effect.map(this.get<Values>("values"), (v) => v ?? {});
 
-  private async state(ev?: Evaluation) {
-    const stored = (await this.ctx.storage.get<Record<string, unknown>>("state")) ?? {};
-    return { ...(ev?.stateDefaults ?? this.ev?.stateDefaults ?? {}), ...stored };
+  private state(ev?: Evaluation | null) {
+    return Effect.map(this.get<Record<string, unknown>>("state"), (stored) => ({ ...(ev?.stateDefaults ?? this.ev?.stateDefaults ?? {}), ...(stored ?? {}) }));
   }
 
   // ---- the isolate -----------------------------------------------------------
 
-  private async isolate() {
-    return loadIsolate(this.env, (await this.version()).compiled.server);
-  }
-
-  private async evaluate(): Promise<Evaluation> {
-    const rec = await this.record();
-    const values = await this.values();
+  private readonly evaluate = Effect.gen({ self: this }, function* () {
+    const rec = yield* this.record;
+    const values = yield* this.values;
     const snapValues = Object.fromEntries(Object.entries(values).map(([k, v]) => [k, { rows: v.rows, status: v.status }]));
-    const ep = await this.isolate();
-    const ev: Evaluation = await ep.evaluate({ props: rec.props, state: await this.state(), values: snapValues });
-    return ev;
-  }
+    const { compiled } = yield* this.version;
+    return (yield* (yield* Isolates).evaluate(compiled.server, { props: rec.props, state: yield* this.state(), values: snapValues })) as Evaluation;
+  });
+
+  /** The last evaluation, or a fresh one if this instance hasn't evaluated yet (e.g. after eviction). */
+  private readonly current = Effect.suspend(() =>
+    this.ev ? Effect.succeed(this.ev) : Effect.tap(this.evaluate, (ev) => Effect.sync(() => void (this.ev ??= ev))),
+  );
 
   // ---- the change stream -----------------------------------------------------
 
@@ -135,83 +149,91 @@ export class BlockDO extends DurableObject<Env> {
     }
   }
 
-  private async snapshot() {
-    const rec = await this.record();
-    const v = await this.version();
-    const ev = this.ev ?? (await this.evaluate());
+  private readonly snapshot = Effect.gen({ self: this }, function* () {
+    const rec = yield* this.record;
+    const v = yield* this.version;
+    const ev = yield* this.current;
     return {
       type: "snapshot",
       offset: this.offset,
       block: { id: rec.id, module: v.manifest.id, client: v.compiled.client },
-      values: await this.values(),
-      state: await this.state(ev),
+      values: yield* this.values,
+      state: yield* this.state(ev),
       describe: ev.describe,
       errors: ev.errors,
       actions: ev.actions,
     };
-  }
+  });
 
   // ---- reconciling: evaluate, fetch what changed, repeat ----------------------
 
-  private async reconcile(force: Set<string> = new Set()) {
-    const rec = await this.record();
-    let ev = await this.evaluate();
-    for (let pass = 0; pass < MAX_PASSES; pass++) {
-      const values = await this.values();
-      for (const q of ev.queries) {
-        if (q.args == null && values[q.name]?.status !== "waiting") {
-          values[q.name] = { rows: [], status: "waiting" };
-          this.push({ type: "change", query: q.name, ops: [], status: "waiting" });
+  private reconcile(force: Set<string> = new Set()) {
+    return Effect.gen({ self: this }, function* () {
+      const rec = yield* this.record;
+      let ev = yield* this.evaluate;
+      for (let pass = 0; pass < MAX_PASSES; pass++) {
+        const values = yield* this.values;
+        for (const q of ev.queries) {
+          if (q.args == null && values[q.name]?.status !== "waiting") {
+            values[q.name] = { rows: [], status: "waiting" };
+            this.push({ type: "change", query: q.name, ops: [], status: "waiting" });
+          }
         }
+        const due = ev.queries.filter((q) => {
+          if (q.args == null) return false;
+          const v = values[q.name];
+          // An error is settled until its args change or someone forces a refetch.
+          const settled = v && (v.status === "ready" || v.status === "error") && same(v.args, q.args);
+          return force.has(q.name) || !settled;
+        });
+        if (!due.length) {
+          yield* this.put("values", values);
+          break;
+        }
+        const grant: Grant = { blockId: rec.id, principal: rec.principal };
+        // Fetch in parallel, then write once: separate read-modify-writes would clobber each other.
+        const results = yield* Effect.forEach(due, (q) => this.fetchQuery(q, grant, values[q.name]), { concurrency: "unbounded" });
+        for (const { name, value, msg } of results) {
+          values[name] = value;
+          if (msg) this.push(msg);
+        }
+        yield* this.put("values", values);
+        force = new Set();
+        ev = yield* this.evaluate; // results may change describe or dependent args
       }
-      await this.ctx.storage.put("values", values);
-      const due = ev.queries.filter((q) => {
-        if (q.args == null) return false;
-        const v = values[q.name];
-        // An error is settled until its args change or someone forces a refetch.
-        const settled = v && (v.status === "ready" || v.status === "error") && JSON.stringify(v.args) === JSON.stringify(q.args);
-        return force.has(q.name) || !settled;
-      });
-      if (!due.length) break;
-      const grant: Grant = { blockId: rec.id, principal: rec.principal };
-      // Fetch in parallel, then write once: separate read-modify-writes would clobber each other.
-      const results = await Promise.all(due.map((q) => this.fetchQuery(q, grant, values[q.name])));
-      for (const { name, value, msg } of results) {
-        values[name] = value;
-        if (msg) this.push(msg);
+
+      const changed = !same(this.ev && { d: this.ev.describe, e: this.ev.errors, a: this.ev.actions }, { d: ev.describe, e: ev.errors, a: ev.actions });
+      this.ev = ev;
+      if (changed) this.push({ type: "meta", describe: ev.describe, errors: ev.errors, actions: ev.actions });
+
+      const topics = [...new Set(ev.queries.flatMap((q) => (q.args == null ? [] : topicsFor(q.tool, q.args))))];
+      if (!same(yield* this.get<string[]>("topics"), topics)) {
+        yield* (yield* Registry).setSubscriptions(rec.id, topics);
+        yield* this.put("topics", topics);
       }
-      await this.ctx.storage.put("values", values);
-      force = new Set();
-      ev = await this.evaluate(); // results may change describe or dependent args
-    }
-
-    const changed = JSON.stringify(this.ev && { d: this.ev.describe, e: this.ev.errors, a: this.ev.actions }) !==
-      JSON.stringify({ d: ev.describe, e: ev.errors, a: ev.actions });
-    this.ev = ev;
-    if (changed) this.push({ type: "meta", describe: ev.describe, errors: ev.errors, actions: ev.actions });
-
-    const topics = [...new Set(ev.queries.flatMap((q) => (q.args == null ? [] : topicsFor(q.tool, q.args))))];
-    const prev = await this.ctx.storage.get<string[]>("topics");
-    if (JSON.stringify(prev) !== JSON.stringify(topics)) {
-      await registry(this.env).setSubscriptions(rec.id, topics);
-      await this.ctx.storage.put("topics", topics);
-    }
-    await this.scheduleAlarm();
+      yield* this.scheduleAlarm;
+    });
   }
 
-  private async fetchQuery(q: QuerySpec, grant: Grant, old: QueryValue | undefined) {
-    try {
-      const { result } = await gateway(this.env).call(grant, q.tool, q.args);
-      const rows = Array.isArray(result) ? result : [{ id: "value", ...(result as object) }];
-      const ops = diff(old?.rows ?? [], rows, q.key);
-      const fetchedAt = Date.now();
-      const value: QueryValue = { rows, status: "ready", args: q.args, fetchedAt, key: q.key };
-      const changed = ops.length || old?.status !== "ready";
-      return { name: q.name, value, msg: changed ? { type: "change", query: q.name, ops, status: "ready", fetchedAt } : null };
-    } catch (e: any) {
-      const value: QueryValue = { rows: old?.rows ?? [], status: "error", args: q.args, error: e.message, key: q.key };
-      return { name: q.name, value, msg: { type: "change", query: q.name, ops: [], status: "error", error: e.message } };
-    }
+  /** One query's fetch. A failed call becomes the query's error status, not a failed reconcile. */
+  private fetchQuery(q: QuerySpec, grant: Grant, old: QueryValue | undefined) {
+    return callTool(grant, q.tool, q.args).pipe(
+      Effect.map(({ result }) => {
+        const rows = Array.isArray(result) ? result : [{ id: "value", ...(result as object) }];
+        const ops = diff(old?.rows ?? [], rows, q.key);
+        const fetchedAt = Date.now();
+        const value: QueryValue = { rows, status: "ready", args: q.args, fetchedAt, key: q.key };
+        const changed = ops.length > 0 || old?.status !== "ready";
+        return { name: q.name, value, msg: changed ? { type: "change", query: q.name, ops, status: "ready", fetchedAt } : null };
+      }),
+      Effect.catchTag("ToolError", (e) =>
+        Effect.succeed({
+          name: q.name,
+          value: { rows: old?.rows ?? [], status: "error", args: q.args, error: e.message, key: q.key } as QueryValue,
+          msg: { type: "change", query: q.name, ops: [], status: "error", error: e.message },
+        }),
+      ),
+    );
   }
 
   // ---- polling: only while someone is watching -------------------------------
@@ -220,62 +242,75 @@ export class BlockDO extends DurableObject<Env> {
     return this.ctx.getWebSockets().length > 0;
   }
 
-  private async scheduleAlarm() {
-    const polled = (this.ev?.queries ?? []).filter((q) => q.refreshMs && q.args != null);
+  private readonly scheduleAlarm = Effect.gen({ self: this }, function* () {
+    if (!this.observed()) return;
+    const polled = (yield* this.current).queries.filter((q) => q.refreshMs && q.args != null);
     if (!polled.length || !this.observed()) return;
-    const values = await this.values();
+    const values = yield* this.values;
     const next = Math.min(...polled.map((q) => (values[q.name]?.fetchedAt ?? 0) + q.refreshMs!));
-    const current = await this.ctx.storage.getAlarm();
-    if (current == null || current > next) await this.ctx.storage.setAlarm(Math.max(next, Date.now() + 250));
-  }
+    const current = yield* Effect.promise(() => this.ctx.storage.getAlarm());
+    if (current == null || current > next) yield* Effect.promise(() => this.ctx.storage.setAlarm(Math.max(next, Date.now() + 250)));
+  });
 
   async alarm() {
     if (!this.observed()) return; // nobody watching: stop polling, let the DO sleep
-    await this.serial(async () => {
-      const values = await this.values();
-      const now = Date.now();
-      const due = (this.ev?.queries ?? []).filter((q) => q.refreshMs && now - (values[q.name]?.fetchedAt ?? 0) >= q.refreshMs - 50);
-      await this.reconcile(new Set(due.map((q) => q.name)));
-    });
+    await this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const values = yield* this.values;
+          const now = Date.now();
+          const due = (yield* this.current).queries.filter((q) => q.refreshMs && now - (values[q.name]?.fetchedAt ?? 0) >= q.refreshMs - 50);
+          yield* this.reconcile(new Set(due.map((q) => q.name)));
+        }),
+      ),
+    );
   }
 
   // ---- RPC from the worker ---------------------------------------------------
 
-  async init(rec: BlockRecord) {
-    return this.serial(async () => {
-      await this.ctx.storage.put("record", rec);
-      await this.ctx.storage.delete(["values", "state", "topics"]);
-      this.ev = null;
-      this.versionCache = null;
-      await this.reconcile();
-      return this.ev!.describe;
-    });
+  init(rec: BlockRecord) {
+    return this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          yield* this.put("record", rec);
+          yield* Effect.promise(() => this.ctx.storage.delete(["values", "state", "topics"]));
+          this.ev = null;
+          this.versionCache = null;
+          yield* this.reconcile();
+          return this.ev!.describe;
+        }),
+      ),
+    );
   }
 
   /**
    * Switch to a new version or props in place. State and cached rows stay; queries
    * whose args didn't change aren't refetched, and ones the new code dropped are pruned.
    */
-  async update(rec: BlockRecord) {
-    return this.serial(async () => {
-      const old = await this.record();
-      await this.ctx.storage.put("record", rec);
-      this.versionCache = null;
-      await this.reconcile();
-      const keep = new Set(this.ev!.queries.map((q) => q.name));
-      const values = await this.values();
-      const pruned = Object.keys(values).filter((k) => !keep.has(k));
-      if (pruned.length) {
-        for (const k of pruned) delete values[k];
-        await this.ctx.storage.put("values", values);
-      }
-      if (old.versionId !== rec.versionId) {
-        const v = await this.version();
-        // Viewers reload the iframe with the new client bundle, then resync.
-        this.push({ type: "version", versionId: v.id, client: v.compiled.client });
-      }
-      return this.ev!.describe;
-    });
+  update(rec: BlockRecord) {
+    return this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const old = yield* this.record;
+          yield* this.put("record", rec);
+          this.versionCache = null;
+          yield* this.reconcile();
+          const keep = new Set(this.ev!.queries.map((q) => q.name));
+          const values = yield* this.values;
+          const pruned = Object.keys(values).filter((k) => !keep.has(k));
+          if (pruned.length) {
+            for (const k of pruned) delete values[k];
+            yield* this.put("values", values);
+          }
+          if (old.versionId !== rec.versionId) {
+            const v = yield* this.version;
+            // Viewers reload the iframe with the new client bundle, then resync.
+            this.push({ type: "version", versionId: v.id, client: v.compiled.client });
+          }
+          return this.ev!.describe;
+        }),
+      ),
+    );
   }
 
   /** Removed from the canvas: close viewers and drop everything. */
@@ -292,86 +327,115 @@ export class BlockDO extends DurableObject<Env> {
   }
 
   /** A webhook touched these topics: refetch the queries that registered them. */
-  async notify(topics: string[]) {
-    return this.serial(async () => {
-      const ev = this.ev ?? (await this.evaluate());
-      const hit = ev.queries.filter((q) => q.args != null && topicsFor(q.tool, q.args).some((t) => topics.includes(t)));
-      if (hit.length) await this.reconcile(new Set(hit.map((q) => q.name)));
-      return hit.map((q) => q.name);
-    });
+  notify(topics: string[]) {
+    return this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const ev = yield* this.current;
+          const hit = ev.queries.filter((q) => q.args != null && topicsFor(q.tool, q.args).some((t) => topics.includes(t)));
+          if (hit.length) yield* this.reconcile(new Set(hit.map((q) => q.name)));
+          return hit.map((q) => q.name);
+        }),
+      ),
+    );
   }
 
-  async refresh() {
-    return this.serial(async () => {
-      const ev = this.ev ?? (await this.evaluate());
-      await this.reconcile(new Set(ev.queries.map((q) => q.name)));
-    });
+  refresh() {
+    return this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const ev = yield* this.current;
+          yield* this.reconcile(new Set(ev.queries.map((q) => q.name)));
+        }),
+      ),
+    );
   }
 
-  async setState(key: string, value: unknown) {
-    return this.serial(async () => {
-      const stored = (await this.ctx.storage.get<Record<string, unknown>>("state")) ?? {};
-      stored[key] = value;
-      await this.ctx.storage.put("state", stored);
-      this.push({ type: "state", key, value });
-      await this.reconcile();
-    });
+  setState(key: string, value: unknown) {
+    return this.run(
+      this.locked(
+        Effect.gen({ self: this }, function* () {
+          const stored = (yield* this.get<Record<string, unknown>>("state")) ?? {};
+          stored[key] = value;
+          yield* this.put("state", stored);
+          this.push({ type: "state", key, value });
+          yield* this.reconcile();
+        }),
+      ),
+    );
   }
 
-  async runAction(name: string, input: any, opts: { confirmed?: boolean } = {}) {
-    const topics = await this.serial(async () => {
-      const rec = await this.record();
-      const ev = this.ev ?? (await this.evaluate());
-      const action = ev.actions.find((a) => a.name === name);
-      if (!action) throw new Error(`no action ${name}`);
-      if (action.permission === "confirm" && !opts.confirmed) throw new Error(`${name} needs confirmation`);
-      const grant: Grant = { blockId: rec.id, principal: rec.principal };
-      const { result, topics } = await gateway(this.env).call(grant, action.tool, input);
-      // Single flight: refetch what this action invalidates before replying.
-      await this.reconcile(new Set(action.invalidates));
-      return { result, topics };
-    });
-    // Other blocks hear about it the way they'd hear a webhook.
-    this.ctx.waitUntil(fanout(this.env, topics.topics, (await this.record()).id));
-    return topics.result;
+  runAction(name: string, input: any, opts: { confirmed?: boolean } = {}) {
+    return this.run(
+      Effect.gen({ self: this }, function* () {
+        const { result, topics, blockId } = yield* this.locked(
+          Effect.gen({ self: this }, function* () {
+            const rec = yield* this.record;
+            const ev = yield* this.current;
+            const action = ev.actions.find((a) => a.name === name);
+            if (!action) return yield* Effect.fail(new Refused({ message: `no action ${name}` }));
+            if (action.permission === "confirm" && !opts.confirmed) return yield* Effect.fail(new Refused({ message: `${name} needs confirmation` }));
+            // Writes aren't retried: a retry could apply them twice.
+            const out = yield* callTool({ blockId: rec.id, principal: rec.principal }, action.tool, input, { retries: 0 });
+            // Single flight: refetch what this action invalidates before replying.
+            yield* this.reconcile(new Set(action.invalidates));
+            return { ...out, blockId: rec.id };
+          }),
+        );
+        // Other blocks hear about it the way they'd hear a webhook, after we reply.
+        this.ctx.waitUntil(this.rt.runPromise(fanout(topics, blockId)));
+        return result;
+      }),
+    );
   }
 
   /** What an agent reads: the describe line plus an outline of where each value came from. */
-  async describeBlock() {
-    const rec = await this.record();
-    const v = await this.version();
-    const ev = this.ev ?? (await this.evaluate());
-    const values = await this.values();
-    return {
-      id: rec.id,
-      module: v.manifest.id,
-      version: v.id,
-      commit: v.commit,
-      principal: rec.principal,
-      describe: ev.describe,
-      errors: ev.errors,
-      outline: ev.queries.map((q) => ({
-        query: q.name,
-        tool: q.tool,
-        args: q.args,
-        status: values[q.name]?.status ?? "pending",
-        rows: values[q.name]?.rows.length ?? 0,
-        fetchedAt: values[q.name]?.fetchedAt ?? null,
-        freshness: q.refreshMs ? `polled every ${q.refreshMs / 1000}s while observed` : topicsFor(q.tool, q.args).length ? `live via ${topicsFor(q.tool, q.args).join(", ")}` : "fetched on change",
-        error: values[q.name]?.error,
-      })),
-      actions: ev.actions,
-      state: await this.state(ev),
-      viewers: this.ctx.getWebSockets().length,
-      offset: this.offset,
-      sandbox: await (await this.isolate()).probe(),
-    };
+  describeBlock() {
+    return this.run(
+      Effect.gen({ self: this }, function* () {
+        const rec = yield* this.record;
+        const v = yield* this.version;
+        const ev = yield* this.current;
+        const values = yield* this.values;
+        return {
+          id: rec.id,
+          module: v.manifest.id,
+          version: v.id,
+          commit: v.commit,
+          principal: rec.principal,
+          describe: ev.describe,
+          errors: ev.errors,
+          outline: ev.queries.map((q) => ({
+            query: q.name,
+            tool: q.tool,
+            args: q.args,
+            status: values[q.name]?.status ?? "pending",
+            rows: values[q.name]?.rows.length ?? 0,
+            fetchedAt: values[q.name]?.fetchedAt ?? null,
+            freshness: q.refreshMs
+              ? `polled every ${q.refreshMs / 1000}s while observed`
+              : topicsFor(q.tool, q.args).length
+                ? `live via ${topicsFor(q.tool, q.args).join(", ")}`
+                : "fetched on change",
+            error: values[q.name]?.error,
+          })),
+          actions: ev.actions,
+          state: yield* this.state(ev),
+          viewers: this.ctx.getWebSockets().length,
+          offset: this.offset,
+          sandbox: yield* (yield* Isolates).probe(v.compiled.server),
+        };
+      }),
+    );
   }
 
   // ---- viewers ---------------------------------------------------------------
 
   async fetch(req: Request) {
     if (req.headers.get("Upgrade") !== "websocket") return new Response("expected websocket", { status: 426 });
+    // A closed or never-created block has no record: refuse before accepting the socket.
+    const rec = await this.ctx.storage.get<BlockRecord>("record");
+    if (!rec) return new Response("no such block", { status: 404 });
     const since = Number(new URL(req.url).searchParams.get("since") ?? NaN);
     const pair = new WebSocketPair();
     const [client, server] = [pair[0], pair[1]];
@@ -381,9 +445,9 @@ export class BlockDO extends DurableObject<Env> {
     if (Number.isFinite(since) && first != null && since >= first - 1 && since <= this.offset) {
       for (const entry of this.log) if (entry.offset > since) server.send(JSON.stringify(entry));
     } else {
-      server.send(JSON.stringify(await this.serial(() => this.snapshot())));
+      server.send(JSON.stringify(await this.run(this.locked(this.snapshot))));
     }
-    await this.scheduleAlarm(); // a viewer arrived: polling resumes
+    await this.run(this.scheduleAlarm); // a viewer arrived: polling resumes
     return new Response(null, { status: 101, webSocket: client });
   }
 

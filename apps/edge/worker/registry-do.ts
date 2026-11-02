@@ -17,7 +17,7 @@ export interface BlockRecord {
   id: string;
   moduleId: string;
   versionId: string;
-  props: Record<string, unknown>;
+  props: Record<string, any>;
   principal: string;
 }
 

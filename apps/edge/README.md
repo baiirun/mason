@@ -41,6 +41,19 @@ curl -s localhost:8787/api/canvas
 curl -s -X POST localhost:8787/api/canvas/ops -d '{"type":"open","module":"ci-board","near":"web-desk"}'
 ```
 
+## Runtime
+
+The Durable Objects and the publish path run on Effect 4 (`worker/runtime.ts`): services for the gateway, registry, isolates and other DOs; typed errors (`ToolError`, `Refused`, `NotFound`, `BundleError`, `PeerError`); tool calls with a 15 s timeout and exponential retries for retryable failures (reads only, never actions); and one semaphore per Block DO and Canvas DO so concurrent changes apply one at a time. Callers over RPC get a plain `Error` with the failure's message.
+
+To run tests without touching your local canvas, start an isolated copy:
+
+```
+GIT_DATA=/tmp/mason-test/git GIT_PORT=8798 node scripts/git-server.mjs &
+npx wrangler dev --port 8797 --persist-to /tmp/mason-test/state --var GIT_UPSTREAM:http://localhost:8798
+curl -X POST localhost:8797/api/seed
+BASE=http://localhost:8797 npm run smoke
+```
+
 ## What's real and what's mocked
 
 | Piece | Here |
