@@ -85,7 +85,7 @@ Actor: the prototype records `user:byron`. Planned: the authenticated principal 
 }
 ```
 
-Implemented. Planned: `rows` on request (`?query=<name>&limit=`), a view outline from `@mason/ui`, a screenshot, and recent view errors.
+Implemented. Planned: `rows` on request (`?query=<name>&limit=`), a view outline from `@mason/ui`, a screenshot, recent view errors, and `events`: the block's recent emitted events (envelopes, see [Events and automations](block-code-api.md#events-and-automations-planned)).
 
 ## Canvas WebSocket: `GET /api/canvas/ws`
 
@@ -158,4 +158,4 @@ The same operations, for agents that reach the platform over MCP:
 | `block_read` | `GET /api/blocks/:id` (plus rows and screenshot when added) |
 | `block_action`, `block_set_state`, `block_refresh` | the block endpoints |
 
-Each tool call carries the agent session's principal; the canvas checks it like a person's op.
+Each tool call carries the agent session's principal and, for automation sessions, the run id. The canvas checks the principal like a person's op; the Block DO records the run id as the cause of the change, which events emitted from it inherit (the loop guard).

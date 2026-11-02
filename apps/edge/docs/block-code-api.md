@@ -91,6 +91,21 @@ After the call, the platform refetches what the action invalidates and notifies 
 
 The one line agents see about the block: what it shows right now. Recomputed with `setup`. Implemented.
 
+### `block.on(query, handler)` (Planned)
+
+Runs `handler(change)` when a query's rows change. `change` is `{ added, updated, removed }`: rows keyed by the query's `key`, computed by the Block DO from its diff. Handlers run in the block's isolate after each reconcile. They can't call tools or reach the network; they can only `emit`. Use them for quick, in-block reactions. Anything that does work is an automation (see [Events and automations](#events-and-automations-planned)).
+
+```ts
+block.on(prs, (change) => {
+  const red = change.updated.filter((p) => p.ci === "failing");
+  if (red.length) block.emit("pr_turned_red", { prs: red.map((p) => ({ repo: p.repo, number: p.number, title: p.title })) });
+});
+```
+
+### `block.emit(name, payload)` (Planned)
+
+Emits a named event from a `block.on` handler. `name` is lowercase letters, digits and `_`. `payload` must be JSON and at most 16 KB; prefer structured fields over free text. The isolate returns emits as data and the Block DO delivers them.
+
 ### `ctx.mcp`
 
 Typed references to the tools in the catalog, e.g. `ctx.mcp.github.list_pull_requests`. A reference only names the tool; calling it is the platform's job. Implemented with a fixed mock catalog; Planned: generated from the workspace's MCP gateway connectors.
@@ -112,6 +127,53 @@ Runs in a `sandbox="allow-scripts"` iframe on a separate origin with CSP `defaul
 | `refresh()` | | Refetches every query. |
 
 Exports: `Section`, `Stat`, `Badge`, `Table` (themed components); `useState`, `useMemo`, `useEffect`, `useRef`, `useCallback`. A view that throws renders an error in place and reports it to the host. Implemented.
+
+## Events and automations (Planned)
+
+Blocks don't run workflows. Durable, multi-step work belongs to the product's existing automations (a trigger plus a prompt that starts an agent session). Blocks plug into them in three ways: as a trigger source, as something sessions read and change, and as a place runs are shown.
+
+### Delivery path
+
+```
+block.on handler (isolate)  →  Block DO  →  Queue  →  trigger router  →  automation session
+     returns emits              envelope,     durable,     matches            existing run path
+                                debounce, log  retries      block:<id>:<event>
+```
+
+1. After a reconcile, the Block DO calls the isolate with each changed query's `change`. The SDK runs the matching handlers and returns their emits.
+2. The Block DO validates each emit, debounces per `(block, event)` (default one per 10 s), appends it to the block's event log, and puts an envelope on a Cloudflare Queue.
+3. The queue consumer hands the envelope to the product's trigger router, which treats it as trigger key `block:<block id>:<event>`, finds the automations subscribed to it, and starts their sessions with the prompt plus the envelope.
+
+### Envelope
+
+```json
+{
+  "id": "evt_01J…",
+  "workspace": "workspace",
+  "block": "ci-board",
+  "version": "ci-board@3a6f080",
+  "event": "pr_turned_red",
+  "payload": { "prs": [{ "repo": "inspect/web", "number": 15, "title": "Fix link group colors" }] },
+  "cause": { "actor": "webhook:github" },
+  "at": 1793600000000
+}
+```
+
+`cause.actor` is whoever caused the change the event came from: `webhook:<source>`, `user:<id>`, `agent:<session>` or `automation:<automation id>/run:<run id>`.
+
+### Guarantees and guards
+
+- **At-least-once.** The router deduplicates by `id`. Order across events is not guaranteed; sessions should re-read the block (`block_read`) rather than rely on order.
+- **Loop guard.** A session's Mason tool calls (`block_set_state`, `block_action`, canvas ops) carry its run id; the Block DO records it as the cause of the next reconcile, and events from that reconcile inherit it. The router doesn't start an automation from its own runs' effects, and stops chains of automation-caused events after 3 hops.
+- **Untrusted content.** Payload text can come from upstream data (PR titles, messages). Sessions receive the envelope marked as data, not instructions.
+
+### Sessions and blocks
+
+Automation sessions have the same tools as regular sessions, plus the Mason block and canvas tools ([canvas-api.md](canvas-api.md#mcp-tools-for-agents-planned)): read a block, set its state, run its actions, open blocks. A session can also edit block code through the workspace repo like any agent.
+
+### On the canvas
+
+An automation block shows one automation: its trigger, recent runs with status, and a link to open a run as a session block. Closing it never stops the automation.
 
 ## Tool catalog (prototype)
 
