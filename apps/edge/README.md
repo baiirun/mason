@@ -1,5 +1,7 @@
 # edge: Block DO prototype
 
+Design and API docs: [overview](../../docs/overview.md), [block code API](../../docs/block-code-api.md), [canvas API](../../docs/canvas-api.md), [workflow API (draft)](../../docs/workflow-api.md).
+
 A throwaway prototype of live blocks on Cloudflare Workers, run locally with `wrangler dev` (workerd/miniflare). It tests one slice of the design: block code lives in a git repo that agents clone and push like any other code; a Durable Object per block runs that code in a sandboxed isolate, keeps its data fresh by push or poll, and streams it into a sandboxed view. Postgres, the MCP gateway and Cloudflare Artifacts are mocked.
 
 ```

@@ -2,7 +2,7 @@
 
 Mason lays out and drives many live things in one place, for people and agents alike. The frontend is a canvas of blocks; the backend is an API that multiplexes the data, sessions and processes behind them. This page is the map: what each layer is, what Mason owns, and what it hands to existing primitives.
 
-`apps/edge` is a local prototype of this design on Cloudflare Workers (workerd/miniflare), with Postgres, the MCP gateway and Cloudflare Artifacts mocked. The real product runs on Cloudflare Workers with a separate Postgres backend and an existing sessions and automations runtime.
+[`apps/edge`](../apps/edge) is a local prototype of this design on Cloudflare Workers (workerd/miniflare), with Postgres, the MCP gateway and Cloudflare Artifacts mocked. The real product runs on Cloudflare Workers with a separate Postgres backend and an existing sessions and automations runtime.
 
 Specs:
 
