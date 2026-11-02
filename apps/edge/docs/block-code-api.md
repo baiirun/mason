@@ -95,13 +95,29 @@ An action can emit an event instead of calling a tool. It's how a button in a vi
 block.action("investigate", { emits: "investigate_pr" });
 ```
 
-The caller's `input` becomes the event's payload (JSON, at most 16 KB). The event is delivered like any other (see [Events and automations](#events-and-automations-planned)), with `cause` set to whoever called the action: `user:<id>` for a click, `agent:<session>` or `automation:<id>/run:<id>` for a tool call. The action resolves immediately with `{ eventId }`; it doesn't wait for automation runs to start.
+The caller's `input` becomes the event's payload (JSON, at most 16 KB). The event is namespaced like any emit (`<module>.investigate_pr`). The event is delivered like any other (see [Events and automations](#events-and-automations-planned)), with `cause` set to whoever called the action: `user:<id>` for a click, `agent:<session>` or `automation:<id>/run:<id>` for a tool call. The action resolves immediately with `{ eventId }`; it doesn't wait for automation runs to start.
 
 Use a tool action for a direct, single write (close a PR). Use an event action for work an agent should do: multi-step, judgment calls, or producing something.
 
 ### `block.describe(fn: () => string)`
 
 The one line agents see about the block: what it shows right now. Recomputed with `setup`. Implemented.
+
+### `block.status(fn: () => Status | null)` (Planned)
+
+The block's current state, for the canvas and for "what needs me" views. Separate from events: an event says something happened; status says what the block is doing now. The vocabulary follows Rex's Program Status Protocol (OSC 7501):
+
+```ts
+type Status = {
+  state: "idle" | "working" | "blocked" | "finished" | "failed";
+  kind?: string;   // for blocked: "permission", "input", "review"...
+  msg?: string;    // one line, shown to people and agents
+};
+
+block.status(() => (red.length ? { state: "blocked", kind: "review", msg: `${red.length} PRs failing` } : { state: "idle" }));
+```
+
+Recomputed with `setup`. The canvas shows it (spinner, blocked marker) and pushes changes to viewers; agents read it in the block's agent view. Sessions and automation runs report the same shape, so one view can list everything waiting on a person.
 
 ### `block.on(query, handler)` (Planned)
 
@@ -116,7 +132,7 @@ block.on(prs, (change) => {
 
 ### `block.emit(name, payload)` (Planned)
 
-Emits a named event from a `block.on` handler. `name` is lowercase letters, digits and `_`. `payload` must be JSON and at most 16 KB; prefer structured fields over free text. The isolate returns emits as data and the Block DO delivers them.
+Emits a named event from a `block.on` handler. `name` is lowercase letters, digits and `_`. Events are namespaced by module, like Rex's `<kind>.<event>`: `block.emit("pr_turned_red")` in `ci-board` is delivered as `ci-board.pr_turned_red`. `payload` must be JSON and at most 16 KB; prefer structured fields over free text. The isolate returns emits as data and the Block DO delivers them.
 
 ### `ctx.mcp`
 
@@ -150,12 +166,12 @@ Blocks don't run workflows. Durable, multi-step work belongs to the product's ex
 ```
 block.on handler (isolate)  →  Block DO  →  Queue  →  trigger router  →  automation session
      returns emits              envelope,     durable,     matches            existing run path
-                                debounce, log  retries      block:<id>:<event>
+                                debounce, log  retries      <module>.<event>
 ```
 
 1. After a reconcile, the Block DO calls the isolate with each changed query's `change`. The SDK runs the matching handlers and returns their emits.
 2. The Block DO validates each emit, debounces per `(block, event)` (default one per 10 s), appends it to the block's event log, and puts an envelope on a Cloudflare Queue.
-3. The queue consumer hands the envelope to the product's trigger router, which treats it as trigger key `block:<block id>:<event>`, finds the automations subscribed to it, and starts their sessions with the prompt plus the envelope.
+3. The queue consumer hands the envelope to the product's trigger router. An automation subscribes to an event name, `<module>.<event>`, optionally narrowed to one block (`ci-board.pr_turned_red` on block `ci-board`, or from any block of that module). The router finds the matching automations and starts their sessions with the prompt plus the envelope.
 
 ### Envelope
 
@@ -165,7 +181,7 @@ block.on handler (isolate)  →  Block DO  →  Queue  →  trigger router  → 
   "workspace": "workspace",
   "block": "ci-board",
   "version": "ci-board@3a6f080",
-  "event": "pr_turned_red",
+  "event": "ci-board.pr_turned_red",
   "payload": { "prs": [{ "repo": "inspect/web", "number": 15, "title": "Fix link group colors" }] },
   "cause": { "actor": "webhook:github" },
   "at": 1793600000000

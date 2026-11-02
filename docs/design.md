@@ -1,5 +1,7 @@
 # Panel multiplexer for inspect.com: design brainstorm
 
+> **Note:** this is the original frontend brainstorm (split trees, panes, tabs). The current direction, a canvas of git-authored blocks backed by Durable Objects plus a backend API for sessions and processes, is described in [apps/edge/docs/overview.md](../apps/edge/docs/overview.md). The keyboard, linking and remount ideas below still apply to the frontend.
+
 A React package that lets users build **spaces** (workspaces) out of arbitrary **panes** (docs, coding sessions, previews, terminals, diffs...), tile them like tmux/i3, drag them around like VS Code/dockview, and drive it all from the keyboard.
 
 Working name below: `@inspect/mux`.

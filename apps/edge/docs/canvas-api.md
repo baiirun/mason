@@ -25,6 +25,7 @@ interface Instance {
   rect: { x: number; y: number; w: number; h: number };  // canvas px
   z: number;                                // stacking order
   principal: string;                        // whose credentials the block's calls use
+  status?: Status;                          // Planned: the block's current status (block-code-api.md#blockstatus)
 }
 ```
 
@@ -86,7 +87,7 @@ Actor: the prototype records `user:byron`. Planned: the authenticated principal 
 }
 ```
 
-Implemented. Planned: `rows` on request (`?query=<name>&limit=`), a view outline from `@mason/ui`, a screenshot, recent view errors, and `events`: the block's recent emitted events (envelopes, see [Events and automations](block-code-api.md#events-and-automations-planned)).
+Implemented. Planned: `status`, `rows` on request (`?query=<name>&limit=`), a view outline from `@mason/ui`, a screenshot, recent view errors, and `events`: the block's recent emitted events (envelopes, see [Events and automations](block-code-api.md#events-and-automations-planned)).
 
 ## Canvas WebSocket: `GET /api/canvas/ws`
 
@@ -99,9 +100,11 @@ Server → client:
 | `{ type: "snapshot", seq, blocks }` | On connect. |
 | `{ type: "op", seq, op, actor, block? }` | After any op. `block` (with `client`) is present unless the op was `close`. |
 | `{ type: "version", seq, id, versionId, block }` | A publish moved a block to a new version; `block.client` is the new bundle. |
+| `{ type: "status", seq, id, status }` | Planned. A block's status changed (the canvas shows spinners and blocked markers from these). |
+| `{ type: "event", seq, id, event }` | Planned, with `?events=1`. Every event emitted by any block on the canvas: one place to follow a workspace, like `rex events -s SESSION`. |
 | `{ type: "ack", id, ok, seq? , error? }` | Reply to an op this client sent. |
 
-Client → server: `{ type: "op", id, op }`.
+Client → server: `{ type: "op", id, op }`. Connect with `?events=1` to also receive every block event.
 
 Clients apply ops as they arrive and may move a card locally while dragging, sending one `move`/`resize` on release. Implemented. Planned: resume by `seq`.
 
@@ -119,6 +122,7 @@ Server → client:
 | `{ type: "meta", offset, describe, errors, actions }` | Describe line, errors or actions changed. |
 | `{ type: "version", offset, versionId, client }` | The block moved to a new version. |
 | `{ type: "event", offset, event: { id, name, cause, at, runs } }` | Planned. An event was emitted, or the router reported runs for it. |
+| `{ type: "status", offset, status }` | Planned. The block's status changed. |
 | `{ type: "ack", id, ok, result? , error? }` | Reply to an action. `result` is `{ eventId }` for an event action. Not in the offset sequence. |
 
 Client → server: `{ type: "action", id, name, input, confirmed?, clientId? }`, `{ type: "setState", key, value }`, `{ type: "refresh" }`. `clientId` (Planned) makes an action idempotent: a repeat with the same `clientId` returns the first result.
