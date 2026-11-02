@@ -1,2 +1,3 @@
 worker/generated/
 .wrangler/
+.git-data/

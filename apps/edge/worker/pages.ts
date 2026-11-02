@@ -14,30 +14,47 @@ export function hostPage(env: { FRAME_ORIGIN: string }) {
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Block DO prototype</title>
 <style>${TOKENS}
-  header { padding: 18px 24px 8px; display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; }
+  header { padding: 14px 20px 6px; display:flex; flex-wrap:wrap; gap:12px; align-items:baseline; }
   header h1 { font-size:18px; margin:0; }
   header p { margin:0; color:var(--muted); }
-  .sim { padding: 0 24px 12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
-  .sim span { color:var(--muted); margin-right:4px; }
-  button { font:inherit; border:1px solid var(--line); background:var(--surface); color:var(--fg); border-radius:6px; padding:4px 10px; cursor:pointer; }
-  button:hover { border-color: var(--accent); }
-  .desk { display:grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 460px), 1fr)); gap:16px; padding: 8px 24px 32px; }
-  .card { background:var(--surface); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column; min-width:0; }
-  .card-head { padding:10px 12px; border-bottom:1px solid var(--line); display:grid; gap:4px; }
-  .card-head .top { display:flex; gap:8px; align-items:center; }
-  .card-head strong { font-size:13px; }
-  .card-head .meta { margin-left:auto; color:var(--muted); font-family: ui-monospace, Menlo, monospace; font-size:11px; }
-  .describe { color:var(--muted); font-size:12px; }
+  .bar { padding: 0 20px 10px; display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  .bar span { color:var(--muted); }
+  .bar .sep { width:1px; height:20px; background:var(--line); margin:0 6px; }
+  button, select, input { font:inherit; border:1px solid var(--line); background:var(--surface); color:var(--fg); border-radius:6px; padding:4px 10px; }
+  button { cursor:pointer; } button:hover { border-color: var(--accent); }
+  input { width: 130px; }
+  .desk { position:relative; margin: 0 20px 40px; min-height: 70vh; border:1px dashed var(--line); border-radius:12px;
+          background-image: radial-gradient(var(--line) 1px, transparent 1px); background-size: 24px 24px; overflow:auto; }
+  .desk.dragging iframe { pointer-events:none; }
+  .card { position:absolute; background:var(--surface); border:1px solid var(--line); border-radius:10px; display:flex; flex-direction:column;
+          box-shadow: 0 6px 24px rgba(0,0,0,.18); overflow:hidden; }
+  .card-head { padding:8px 10px; border-bottom:1px solid var(--line); display:grid; gap:3px; cursor:grab; user-select:none; }
+  .desk.dragging .card-head { cursor:grabbing; }
+  .card-head .top { display:flex; gap:8px; align-items:center; min-width:0; }
+  .card-head strong { font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .card-head .meta { margin-left:auto; color:var(--muted); font-family: ui-monospace, Menlo, monospace; font-size:11px; white-space:nowrap; }
+  .card-head button { padding:1px 8px; font-size:12px; }
+  .describe { color:var(--muted); font-size:12px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
   .describe::before { content:"agent sees: "; color:var(--accent); }
-  iframe { border:0; width:100%; height:120px; display:block; background:var(--surface); border-radius:0 0 10px 10px; }
-  details { padding: 0 12px 10px; }
-  details pre { max-height: 260px; overflow:auto; background:var(--bg); padding:8px; border-radius:6px; }
-  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); }
+  .body { position:relative; flex:1; min-height:0; }
+  iframe { border:0; width:100%; height:100%; display:block; background:var(--surface); }
+  .agent { position:absolute; inset:0; margin:0; padding:10px; overflow:auto; background:var(--bg); font-size:11px; }
+  .grip { position:absolute; right:0; bottom:0; width:16px; height:16px; cursor:nwse-resize;
+          background: linear-gradient(135deg, transparent 50%, var(--muted) 50%); opacity:.5; }
+  .dot { width:8px; height:8px; border-radius:50%; background:var(--muted); flex:none; }
   .dot.on { background: var(--good); }
+  .toast { position:fixed; bottom:16px; left:50%; transform:translateX(-50%); background:var(--surface); border:1px solid var(--bad);
+           color:var(--fg); padding:8px 14px; border-radius:8px; }
 </style></head>
 <body>
-<header><h1>Block DO prototype</h1><p>Each card is a Block DO streaming into a sandboxed view on ${env.FRAME_ORIGIN}.</p></header>
-<div class="sim"><span>Simulate a GitHub webhook:</span>
+<header><h1>Block DO prototype</h1><p>The canvas is server-owned: drag, resize, add and close go through canvas ops. Block code changes go through git.</p></header>
+<div class="bar">
+  <span>Add a block:</span>
+  <select id="module"></select>
+  <input id="repo" placeholder="repo prop (optional)">
+  <button id="add">Add</button>
+  <span class="sep"></span>
+  <span>Simulate a GitHub webhook:</span>
   <button data-hook='{"repo":"inspect/web","number":12,"ci":"failing"}'>web#12 CI fails</button>
   <button data-hook='{"repo":"inspect/web","number":12,"ci":"passing"}'>web#12 CI passes</button>
   <button data-hook='{"repo":"inspect/web","title":"Add minimap","reviewers":["byron"]}'>New PR in web</button>
@@ -46,65 +63,176 @@ export function hostPage(env: { FRAME_ORIGIN: string }) {
 <main class="desk" id="desk"></main>
 <script type="module">
 const FRAME = ${JSON.stringify(env.FRAME_ORIGIN)};
+const wsBase = (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
 const desk = document.getElementById("desk");
+const cards = new Map();
 
 for (const b of document.querySelectorAll("[data-hook]")) {
   b.onclick = () => fetch("/webhook/github", { method: "POST", body: b.dataset.hook });
 }
+function toast(text) {
+  const t = Object.assign(document.createElement("div"), { className: "toast", textContent: text });
+  document.body.append(t);
+  setTimeout(() => t.remove(), 4000);
+}
 
+// ---- canvas ops: one socket, server-owned state --------------------------------
+let canvasWs = null, nextOp = 0;
+const pendingOps = new Map();
+function op(o) {
+  const id = ++nextOp;
+  canvasWs?.send(JSON.stringify({ type: "op", id, op: o }));
+  return new Promise((resolve) => pendingOps.set(id, resolve));
+}
+function connectCanvas() {
+  canvasWs = new WebSocket(wsBase + "/api/canvas/ws");
+  canvasWs.onmessage = (e) => {
+    const m = JSON.parse(e.data);
+    if (m.type === "snapshot") {
+      const ids = new Set(m.blocks.map((b) => b.id));
+      for (const [id, c] of cards) if (!ids.has(id)) { c.remove(); cards.delete(id); }
+      for (const b of m.blocks) cards.has(b.id) ? cards.get(b.id).place(b) : mount(b);
+    } else if (m.type === "op") {
+      if (m.op.type === "close") { cards.get(m.op.id)?.remove(); cards.delete(m.op.id); }
+      else if (m.block) cards.has(m.block.id) ? cards.get(m.block.id).place(m.block) : mount(m.block);
+    } else if (m.type === "version") {
+      cards.get(m.id)?.place(m.block);
+    } else if (m.type === "ack") {
+      pendingOps.get(m.id)?.(m);
+      pendingOps.delete(m.id);
+      if (!m.ok) toast(m.error);
+    }
+    fit();
+  };
+  canvasWs.onclose = () => setTimeout(connectCanvas, 1000);
+}
+function fit() {
+  let bottom = 0;
+  for (const c of cards.values()) bottom = Math.max(bottom, c.rect.y + c.rect.h);
+  desk.style.height = Math.max(bottom + 40, window.innerHeight * 0.7) + "px";
+}
+
+// ---- add a block ----------------------------------------------------------------
+const select = document.getElementById("module");
+async function loadModules() {
+  const mods = await (await fetch("/api/modules")).json();
+  select.innerHTML = mods.map((m) => '<option value="' + m.module + '">' + m.module + "</option>").join("");
+}
+document.getElementById("add").onclick = () => {
+  const repo = document.getElementById("repo").value.trim();
+  op({ type: "open", module: select.value, props: repo ? { repo } : {} });
+};
+
+// ---- a card: one block's view, positioned by the canvas -------------------------
 function mount(block) {
   const card = document.createElement("article");
   card.className = "card";
   card.innerHTML = \`<div class="card-head"><div class="top"><span class="dot"></span><strong></strong>
-      <span class="meta"></span><button class="refresh">Refresh</button></div><div class="describe"></div></div>
-    <iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="block view"></iframe>
-    <details><summary>Agent view (describe + outline)</summary><pre>…</pre></details>\`;
-  card.querySelector("strong").textContent = block.module + " · " + block.id;
+      <span class="meta"></span><button class="agent-btn" title="What an agent reads about this block">Agent view</button>
+      <button class="refresh">Refresh</button><button class="close" title="Close block">✕</button></div>
+      <div class="describe"></div></div>
+    <div class="body"><iframe sandbox="allow-scripts" referrerpolicy="no-referrer" title="block view"></iframe>
+      <pre class="agent" hidden></pre><div class="grip" title="Resize"></div></div>\`;
   desk.append(card);
+  const head = card.querySelector(".card-head");
+  const title = card.querySelector("strong");
   const frame = card.querySelector("iframe");
   const meta = card.querySelector(".meta");
   const describeEl = card.querySelector(".describe");
   const dot = card.querySelector(".dot");
-  const pre = card.querySelector("pre");
-  card.querySelector("details").addEventListener("toggle", async (e) => {
-    if (e.target.open) pre.textContent = JSON.stringify(await (await fetch("/api/blocks/" + block.id)).json(), null, 2);
-  });
-  frame.src = FRAME + "/frame?h=" + block.client.hex + "&i=" + encodeURIComponent(block.client.sri);
+  const agent = card.querySelector(".agent");
+  let current = block, port = null, ws = null, offset = null, bundle = null;
 
-  let port = null, ws = null, offset = null;
+  card.rect = block.rect;
+  card.place = (b) => {
+    current = b;
+    card.style.zIndex = b.z;
+    if (!card.dragging) {
+      // Don't snap back to the server's rect while this client is mid-drag.
+      card.rect = b.rect;
+      Object.assign(card.style, { left: b.rect.x + "px", top: b.rect.y + "px", width: b.rect.w + "px", height: b.rect.h + "px" });
+    }
+    const pin = b.version === "head" ? "" : " (pinned)";
+    title.textContent = b.id + " · " + b.versionId + pin;
+    if (b.client && b.client.hex !== bundle) {
+      bundle = b.client.hex;
+      frame.src = FRAME + "/frame?h=" + b.client.hex + "&i=" + encodeURIComponent(b.client.sri);
+    }
+  };
+  const remove = card.remove.bind(card);
+  card.remove = () => { if (ws) { ws.onclose = null; ws.close(); } remove(); };
+  card.place(block);
+  cards.set(block.id, card);
+
   card.querySelector(".refresh").onclick = () => ws?.send(JSON.stringify({ type: "refresh" }));
+  card.querySelector(".close").onclick = () => op({ type: "close", id: current.id });
+  card.querySelector(".agent-btn").onclick = async () => {
+    agent.hidden = !agent.hidden;
+    if (!agent.hidden) agent.textContent = JSON.stringify(await (await fetch("/api/blocks/" + current.id)).json(), null, 2);
+  };
 
+  // Drag by the header; resize by the corner. Local while moving, one op on release.
+  head.addEventListener("pointerdown", (e) => {
+    if (e.target.closest("button")) return;
+    op({ type: "raise", id: current.id });
+    drag(e, (dx, dy, r) => ({ x: Math.max(0, r.x + dx), y: Math.max(0, r.y + dy) }), (r) => op({ type: "move", id: current.id, x: r.x, y: r.y }));
+  });
+  card.querySelector(".grip").addEventListener("pointerdown", (e) =>
+    drag(e, (dx, dy, r) => ({ w: Math.max(240, r.w + dx), h: Math.max(140, r.h + dy) }), (r) => op({ type: "resize", id: current.id, w: r.w, h: r.h })),
+  );
+  function drag(e, change, commit) {
+    e.preventDefault();
+    const start = { ...card.rect }, sx = e.clientX, sy = e.clientY;
+    card.dragging = true;
+    desk.classList.add("dragging");
+    const move = (ev) => {
+      const r = { ...start, ...change(ev.clientX - sx, ev.clientY - sy, start) };
+      Object.assign(card.style, { left: r.x + "px", top: r.y + "px", width: r.w + "px", height: r.h + "px" });
+      card.rect = r;
+    };
+    const up = () => {
+      card.dragging = false;
+      desk.classList.remove("dragging");
+      removeEventListener("pointermove", move);
+      removeEventListener("pointerup", up);
+      commit(card.rect);
+    };
+    addEventListener("pointermove", move);
+    addEventListener("pointerup", up);
+  }
+
+  // The view's own data stream, straight from its Block DO.
   frame.addEventListener("load", () => {
+    if (ws) { ws.onclose = null; ws.close(); ws = null; offset = null; }
     const ch = new MessageChannel();
     port = ch.port1;
     port.onmessage = (e) => {
       const m = e.data;
-      if (m.type === "size") frame.style.height = Math.min(Math.max(m.height, 80), 640) + "px";
-      else if (m.type === "action" || m.type === "setState" || m.type === "refresh") ws?.send(JSON.stringify(m));
-      else if (m.type === "error") console.warn(block.id, "view error:", m.message);
+      if (m.type === "action" || m.type === "setState" || m.type === "refresh") ws?.send(JSON.stringify(m));
+      else if (m.type === "error") console.warn(current.id, "view error:", m.message);
     };
     frame.contentWindow.postMessage({ type: "mason:init" }, "*", [ch.port2]);
     connect();
   });
-
   function connect() {
     const q = offset == null ? "" : "?since=" + offset;
-    ws = new WebSocket((location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/api/blocks/" + block.id + "/ws" + q);
+    ws = new WebSocket(wsBase + "/api/blocks/" + current.id + "/ws" + q);
     ws.onopen = () => dot.classList.add("on");
     ws.onmessage = (e) => {
       const m = JSON.parse(e.data);
       if (typeof m.offset === "number") offset = m.offset;
       meta.textContent = "offset " + offset;
       if (m.type === "snapshot" || m.type === "meta") describeEl.textContent = m.describe ?? "";
+      if (m.type === "version") return; // the canvas sends the new bundle
       port?.postMessage(m);
     };
-    ws.onclose = () => { dot.classList.remove("on"); setTimeout(connect, 1000); };
+    ws.onclose = () => { dot.classList.remove("on"); if (card.isConnected) setTimeout(connect, 1000); };
   }
+  return card;
 }
 
-const blocks = await (await fetch("/api/blocks")).json();
-if (!blocks.length) desk.innerHTML = "<p>No blocks yet. POST /api/seed to create the examples.</p>";
-blocks.forEach(mount);
+await loadModules();
+connectCanvas();
 </script>
 </body></html>`;
 }

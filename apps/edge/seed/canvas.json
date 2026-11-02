@@ -1,0 +1,5 @@
+[
+  { "id": "web-desk", "module": "oncall-desk", "props": { "repo": "inspect/web" } },
+  { "id": "api-desk", "module": "oncall-desk", "props": { "repo": "inspect/api" } },
+  { "id": "escape", "module": "escape-attempts", "props": {} }
+]

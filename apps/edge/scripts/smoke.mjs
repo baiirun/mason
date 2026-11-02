@@ -111,13 +111,7 @@ const bundle = await fetch(`${BASE}/bundles/client/${b.client.hex}.js`).then((r)
 const sri = "sha256-" + createHash("sha256").update(bundle).digest("base64");
 check("client bundle matches its integrity hash", sri === b.client.sri);
 
-// The compiler's gate.
-const badImport = await post("/api/modules", { moduleId: "bad", source: `import fs from "node:fs"; export default { id: "x", setup() { fs.readFileSync("/etc/passwd") } }` });
-check("compile rejects imports outside the SDK", badImport.status === 422, badImport.error);
-const token = await post("/api/modules", { moduleId: "bad", source: `const t = "ghp_${"a".repeat(30)}"; export default {}` });
-check("compile rejects pasted tokens", token.status === 422, token.error);
-const notABlock = await post("/api/modules", { moduleId: "bad", source: `export default {}` });
-check("compile rejects a module that isn't a Block.define", notABlock.status === 422, notABlock.error);
+// The compiler's gate is exercised through git pushes in smoke-git.mjs.
 
 function seenBefore(list, a, b) {
   return list.indexOf(a) < list.indexOf(b);

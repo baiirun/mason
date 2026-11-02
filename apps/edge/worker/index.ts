@@ -1,42 +1,23 @@
 // Router for the prototype. Real deployments would split these across the
-// ingress Worker, the compile service, the sandbox origin and the app.
+// ingress Worker, the git remote, the sandbox origin and the app.
 import FRAME_SDK from "./generated/frame-sdk.js";
-import ESCAPE from "../examples/escape.tsx";
-import ONCALL from "../examples/oncall.tsx";
-import { compile, CompileError } from "./compile";
-import { blockStub, fanout, gateway, registry, type Env } from "./env";
-import { loadIsolate } from "./isolate";
+import { CompileError } from "./compile";
+import { OpError, type CanvasOp } from "./canvas-do";
+import { blockStub, canvas, fanout, gateway, registry, type Env } from "./env";
+import { handleGit, publishCommit } from "./git";
 import { frameShell, hostPage } from "./pages";
-import type { ModuleVersion } from "./registry-do";
+import { repo } from "./repo";
 
 export { BlockDO } from "./block-do";
+export { CanvasDO } from "./canvas-do";
 export { GatewayDO } from "./gateway-do";
 export { RegistryDO } from "./registry-do";
+
+const WORKSPACE = "workspace";
 
 const json = (data: unknown, status = 200) => Response.json(data, { status });
 const js = (body: string) =>
   new Response(body, { headers: { "content-type": "text/javascript; charset=utf-8", "access-control-allow-origin": "*", "cache-control": "no-store" } });
-
-/** Compile a module, read its manifest by evaluating it in the sandbox, and record the version. */
-async function publishModule(env: Env, moduleId: string, source: string) {
-  const compiled = await compile(source, env.BUNDLES);
-  const ev = await loadIsolate(env, compiled.server).evaluate({ props: {}, state: {}, values: {} });
-  if (!ev.id) throw new CompileError("the module must `export default Block.define({ id, tools, setup, view })`");
-  const version: ModuleVersion = {
-    id: `${moduleId}@${compiled.server.hex.slice(0, 12)}`,
-    moduleId,
-    compiled,
-    manifest: { id: ev.id, tools: ev.tools, queries: ev.queries.map((q: any) => q.name), actions: ev.actions.map((a: any) => a.name) },
-    createdAt: Date.now(),
-  };
-  await registry(env).putVersion(version);
-  return version;
-}
-
-async function createBlock(env: Env, id: string, versionId: string, props: Record<string, unknown>, principal = "user:byron") {
-  await registry(env).putBlock({ id, versionId, props, principal });
-  return blockStub(env, id).init({ id, versionId, props, principal });
-}
 
 export default {
   async fetch(req: Request, env: Env): Promise<Response> {
@@ -44,6 +25,13 @@ export default {
     const path = url.pathname;
     const parts = path.split("/").filter(Boolean);
     try {
+      // The git remote agents clone and push: /git/<workspace>.git/...
+      if (parts[0] === "git" && parts[1]?.endsWith(".git")) {
+        const name = parts[1].slice(0, -4);
+        if (name !== WORKSPACE) return new Response("no such repo\n", { status: 404 });
+        return handleGit(req, env, name, parts.slice(2).join("/"));
+      }
+
       if (req.method === "GET" && path === "/") {
         return new Response(hostPage(env), { headers: { "content-type": "text/html; charset=utf-8" } });
       }
@@ -59,48 +47,57 @@ export default {
         return obj ? js(await obj.text()) : new Response("not found", { status: 404 });
       }
 
+      // Publish every module at the repo's head. On an empty canvas, also open the
+      // blocks listed in the repo's canvas.json, if any: a one-time template, not a sync.
       if (req.method === "POST" && path === "/api/seed") {
-        const oncall = await publishModule(env, "oncall-desk", ONCALL);
-        const escape = await publishModule(env, "escape-attempts", ESCAPE);
-        const created = {
-          "web-desk": await createBlock(env, "web-desk", oncall.id, { repo: "inspect/web" }),
-          "api-desk": await createBlock(env, "api-desk", oncall.id, { repo: "inspect/api" }),
-          "escape": await createBlock(env, "escape", escape.id, {}),
-        };
-        return json({ versions: [oncall.id, escape.id], blocks: created });
+        const r = repo(env, WORKSPACE);
+        const head = await r.head();
+        if (!head) return json({ error: "repo has no commits; is the git stand-in running?" }, 503);
+        const lines = await publishCommit(env, WORKSPACE, null, head);
+        const c = canvas(env);
+        if (!(await c.list()).length) {
+          const template = JSON.parse((await r.readFile(head, "canvas.json")) ?? "[]") as { id: string; module: string; props?: Record<string, unknown> }[];
+          for (const t of template) {
+            await c.apply({ type: "open", id: t.id, module: t.module, props: t.props });
+            lines.push(`canvas: opened ${t.id} from template`);
+          }
+        }
+        return json({ head, lines });
       }
-      if (req.method === "POST" && path === "/api/modules") {
-        const { moduleId, source } = await req.json<{ moduleId: string; source: string }>();
-        return json(await publishModule(env, moduleId, source));
+
+      // The canvas: which blocks exist and where. Changed only by ops.
+      if (path === "/api/canvas" && req.method === "GET") return json(await canvas(env).snapshot());
+      if (path === "/api/canvas/ws") return canvas(env).fetch(req);
+      if (path === "/api/canvas/ops" && req.method === "POST") {
+        const op = await req.json<CanvasOp>();
+        try {
+          return json(await canvas(env).apply(op, req.headers.get("x-actor") ?? "user:byron"));
+        } catch (e: any) {
+          return json({ error: e.message }, 400);
+        }
       }
+      if (path === "/api/modules" && req.method === "GET") return json(await registry(env).listModules());
+      // Compatibility view of the canvas for scripts: one row per block.
       if (path === "/api/blocks" && req.method === "GET") {
-        const reg = registry(env);
-        const blocks = await reg.listBlocks();
-        return json(
-          await Promise.all(
-            blocks.map(async (b) => {
-              const v = (await reg.getVersion(b.versionId))!;
-              return { id: b.id, module: v.manifest.id, props: b.props, client: { hex: v.compiled.client.hex, sri: v.compiled.client.sri } };
-            }),
-          ),
-        );
-      }
-      if (path === "/api/blocks" && req.method === "POST") {
-        const { id, versionId, props, principal } = await req.json<any>();
-        return json({ describe: await createBlock(env, id, versionId, props ?? {}, principal) });
+        const snap = await canvas(env).snapshot();
+        return json(snap.blocks.map((b) => ({ id: b.id, module: b.module, version: b.versionId, props: b.props, rect: b.rect, client: b.client })));
       }
       if (parts[0] === "api" && parts[1] === "blocks" && parts[2]) {
         const stub = blockStub(env, parts[2]);
         if (parts[3] === "ws") return stub.fetch(req);
         if (req.method === "GET" && parts.length === 3) return json(await stub.describeBlock());
-        if (req.method === "POST" && parts[3] === "refresh") return json(await stub.refresh());
+        if (req.method === "POST" && parts[3] === "refresh") {
+          await stub.refresh();
+          return json({ ok: true });
+        }
         if (req.method === "POST" && parts[3] === "actions" && parts[4]) {
           const { input, confirmed } = await req.json<any>();
           return json({ result: await stub.runAction(parts[4], input, { confirmed }) });
         }
         if (req.method === "POST" && parts[3] === "state") {
           const { key, value } = await req.json<any>();
-          return json(await stub.setState(key, value));
+          await stub.setState(key, value);
+          return json({ ok: true });
         }
       }
 

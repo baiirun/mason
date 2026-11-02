@@ -253,6 +253,45 @@ export class BlockDO extends DurableObject<Env> {
     });
   }
 
+  /**
+   * Switch to a new version or props in place. State and cached rows stay; queries
+   * whose args didn't change aren't refetched, and ones the new code dropped are pruned.
+   */
+  async update(rec: BlockRecord) {
+    return this.serial(async () => {
+      const old = await this.record();
+      await this.ctx.storage.put("record", rec);
+      this.versionCache = null;
+      await this.reconcile();
+      const keep = new Set(this.ev!.queries.map((q) => q.name));
+      const values = await this.values();
+      const pruned = Object.keys(values).filter((k) => !keep.has(k));
+      if (pruned.length) {
+        for (const k of pruned) delete values[k];
+        await this.ctx.storage.put("values", values);
+      }
+      if (old.versionId !== rec.versionId) {
+        const v = await this.version();
+        // Viewers reload the iframe with the new client bundle, then resync.
+        this.push({ type: "version", versionId: v.id, client: v.compiled.client });
+      }
+      return this.ev!.describe;
+    });
+  }
+
+  /** Removed from the canvas: close viewers and drop everything. */
+  async destroy() {
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1000, "block removed");
+      } catch {}
+    }
+    await this.ctx.storage.deleteAlarm();
+    await this.ctx.storage.deleteAll();
+    this.ev = null;
+    this.log = [];
+  }
+
   /** A webhook touched these topics: refetch the queries that registered them. */
   async notify(topics: string[]) {
     return this.serial(async () => {
@@ -307,6 +346,8 @@ export class BlockDO extends DurableObject<Env> {
     return {
       id: rec.id,
       module: v.manifest.id,
+      version: v.id,
+      commit: v.commit,
       principal: rec.principal,
       describe: ev.describe,
       errors: ev.errors,

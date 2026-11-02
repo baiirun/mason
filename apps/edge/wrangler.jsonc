@@ -7,14 +7,22 @@
   "durable_objects": {
     "bindings": [
       { "name": "BLOCK", "class_name": "BlockDO" },
+      { "name": "CANVAS", "class_name": "CanvasDO" },
       { "name": "REGISTRY", "class_name": "RegistryDO" },
       { "name": "GATEWAY", "class_name": "GatewayDO" }
     ]
   },
-  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BlockDO", "RegistryDO", "GatewayDO"] }],
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["BlockDO", "RegistryDO", "GatewayDO"] },
+    { "tag": "v2", "new_sqlite_classes": ["CanvasDO"] }
+  ],
   // Module source and the generated frame runtime are bundled into the worker as strings.
-  "rules": [{ "type": "Text", "globs": ["**/*.isolate.js", "**/generated/*.js", "**/examples/*.tsx"], "fallthrough": true }],
+  "rules": [{ "type": "Text", "globs": ["**/*.isolate.js", "**/generated/*.js"], "fallthrough": true }],
   "vars": {
+    // Where block code lives: the local git stand-in (scripts/git-server.mjs). With real Artifacts this is a binding.
+    "GIT_UPSTREAM": "http://localhost:8788",
+    // The password agents use for the git remote: git clone http://agent:dev-token@localhost:8787/git/workspace.git
+    "GIT_TOKEN": "dev-token",
     // Views load from a different origin than the canvas (127.0.0.1 vs localhost), like a real sandbox domain.
     "FRAME_ORIGIN": "http://127.0.0.1:8787",
     "APP_ORIGIN": "http://localhost:8787"

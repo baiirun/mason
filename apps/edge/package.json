@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build:frame": "node scripts/build-frame.mjs",
-    "dev": "npm run build:frame && wrangler dev --port 8787",
-    "smoke": "node scripts/smoke.mjs"
+    "dev": "npm run build:frame && concurrently -k -n git,worker \"node scripts/git-server.mjs\" \"wrangler dev --port 8787\"",
+    "git-server": "node scripts/git-server.mjs",
+    "smoke": "node scripts/smoke.mjs && node scripts/smoke-git.mjs"
   },
   "dependencies": {
     "react": "^19.0.0",

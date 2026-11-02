@@ -1,11 +1,13 @@
-// Stand-in for the Postgres side: module versions, block records and the
-// block_subscriptions topic index. One instance ("main").
+// Stand-in for the Postgres side: module versions and heads, and the
+// block_subscriptions topic index. One instance ("main"). Which blocks exist
+// is the Canvas DO's job.
 import { DurableObject } from "cloudflare:workers";
 import type { Compiled } from "./compile";
 
 export interface ModuleVersion {
   id: string;
   moduleId: string;
+  commit: string;
   compiled: Compiled;
   manifest: { id: string; tools: string[]; queries: string[]; actions: string[] };
   createdAt: number;
@@ -13,6 +15,7 @@ export interface ModuleVersion {
 
 export interface BlockRecord {
   id: string;
+  moduleId: string;
   versionId: string;
   props: Record<string, unknown>;
   principal: string;
@@ -25,14 +28,17 @@ export class RegistryDO extends DurableObject {
   async getVersion(id: string) {
     return (await this.ctx.storage.get<ModuleVersion>(`version:${id}`)) ?? null;
   }
-  async putBlock(b: BlockRecord) {
-    await this.ctx.storage.put(`block:${b.id}`, b);
+  /** The module's current version: what blocks following head (and newly opened ones) run. */
+  async setHead(moduleId: string, versionId: string) {
+    await this.ctx.storage.put(`head:${moduleId}`, versionId);
   }
-  async getBlock(id: string) {
-    return (await this.ctx.storage.get<BlockRecord>(`block:${id}`)) ?? null;
+  async getHead(moduleId: string) {
+    return (await this.ctx.storage.get<string>(`head:${moduleId}`)) ?? null;
   }
-  async listBlocks() {
-    return [...(await this.ctx.storage.list<BlockRecord>({ prefix: "block:" })).values()];
+  /** Published modules and their current versions. */
+  async listModules() {
+    const heads = await this.ctx.storage.list<string>({ prefix: "head:" });
+    return [...heads].map(([k, versionId]) => ({ module: k.slice(5), versionId }));
   }
 
   /** Replace a block's topics: what `delete from block_subscriptions where block_id = $1; insert ...` would do. */
