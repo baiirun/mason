@@ -76,7 +76,6 @@ declare module "@mason/sdk" {
 
   export interface BlockDefinition<Props> {
     id: string;
-    tools: string[];
     setup(block: SetupBlock<Props>, ctx: SetupContext): void;
     view?(props: ViewProps): any;
   }

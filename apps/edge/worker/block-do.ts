@@ -23,7 +23,6 @@ interface ActionSpec {
 }
 interface Evaluation {
   id: string;
-  tools: string[];
   queries: QuerySpec[];
   actions: ActionSpec[];
   describe: string | null;
@@ -174,7 +173,7 @@ export class BlockDO extends DurableObject<Env> {
         return force.has(q.name) || !settled;
       });
       if (!due.length) break;
-      const grant: Grant = { blockId: rec.id, principal: rec.principal, tools: ev.tools };
+      const grant: Grant = { blockId: rec.id, principal: rec.principal };
       // Fetch in parallel, then write once: separate read-modify-writes would clobber each other.
       const results = await Promise.all(due.map((q) => this.fetchQuery(q, grant, values[q.name])));
       for (const { name, value, msg } of results) {
@@ -326,7 +325,7 @@ export class BlockDO extends DurableObject<Env> {
       const action = ev.actions.find((a) => a.name === name);
       if (!action) throw new Error(`no action ${name}`);
       if (action.permission === "confirm" && !opts.confirmed) throw new Error(`${name} needs confirmation`);
-      const grant: Grant = { blockId: rec.id, principal: rec.principal, tools: ev.tools };
+      const grant: Grant = { blockId: rec.id, principal: rec.principal };
       const { result, topics } = await gateway(this.env).call(grant, action.tool, input);
       // Single flight: refetch what this action invalidates before replying.
       await this.reconcile(new Set(action.invalidates));

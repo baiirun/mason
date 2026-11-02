@@ -1,12 +1,11 @@
 // Stand-in for the central MCP gateway plus the upstream services behind it:
 // a fake GitHub (PRs per repo) and a fake Datadog (a p95 metric that only polls).
-// It checks every call against the block grant, like the real gateway would.
+// Each call carries the block's grant: which block is calling and whose credentials it uses.
 import { DurableObject } from "cloudflare:workers";
 
 export interface Grant {
   blockId: string;
   principal: string;
-  tools: string[];
 }
 
 export interface Pr {
@@ -50,7 +49,6 @@ export class GatewayDO extends DurableObject {
 
   /** One MCP tools/call, as the gateway would proxy it. Returns rows or a value. */
   async call(grant: Grant, tool: string, args: any): Promise<{ result: unknown; topics: string[] }> {
-    if (!grant.tools.includes(tool)) throw new Error(`${tool} is not allowed by block ${grant.blockId}'s grant`);
     switch (tool) {
       case "github.list_pull_requests": {
         const rows = (await this.prs()).filter((p) => p.repo === args.repo && (!args.state || p.state === args.state));

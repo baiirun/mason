@@ -3,14 +3,13 @@ import { Block, Section, useEffect, useState } from "@mason/sdk";
 
 export default Block.define({
   id: "escape-attempts",
-  tools: ["github.list_pull_requests"],
 
   setup(block: any, ctx: any) {
-    // Allowed by the grant:
+    // A real tool:
     block.query("prs", ctx.mcp.github.list_pull_requests, () => ({ repo: "inspect/web" }));
-    // Not in this block's tools, so the gateway refuses it:
+    // Not in the catalog, so the gateway refuses it:
     block.query("secrets", ctx.mcp.github.list_repo_secrets, () => ({ repo: "inspect/web" }));
-    block.describe(() => "Sandbox probe: tries network, storage and a tool outside its grant");
+    block.describe(() => "Sandbox probe: tries network, storage and a tool that doesn't exist");
   },
 
   view({ data, errors }: any) {

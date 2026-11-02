@@ -35,7 +35,6 @@ import { Block, Section, Table, type PullRequest } from "@mason/sdk";
 
 export default Block.define<{ repo: string }>({
   id: "open-prs",
-  tools: ["github.list_pull_requests"],
   setup(block, ctx) { ... },
   view(props) { ... },
 });
@@ -44,7 +43,6 @@ export default Block.define<{ repo: string }>({
 | Field | Type | Required | Meaning |
 |---|---|---|---|
 | `id` | string | yes | Module id. Should match the filename. |
-| `tools` | string[] | yes | Every tool the block may call, as `server.tool`. Calls to anything else are refused by the gateway. Planned: adding a tool to an existing module needs approval at merge. |
 | `setup` | `(block, ctx) => void` | yes | Runs on the server in a sandbox. Declares data; never fetches it. |
 | `view` | `(props) => JSX` | no | Runs in the browser in a sandboxed iframe. Omit for a headless block. |
 
@@ -97,6 +95,8 @@ The one line agents see about the block: what it shows right now. Recomputed wit
 
 Typed references to the tools in the catalog, e.g. `ctx.mcp.github.list_pull_requests`. A reference only names the tool; calling it is the platform's job. Implemented with a fixed mock catalog; Planned: generated from the workspace's MCP gateway connectors.
 
+Tool access: a block may call any tool in the catalog, with its principal's credentials (whoever opened it on the canvas). There is no per-block tool list for now. Writes should be `confirm` actions so a person clicks them. Per-block consent grants are a possible later addition.
+
 ## `view(props)`
 
 Runs in a `sandbox="allow-scripts"` iframe on a separate origin with CSP `default-src 'none'; connect-src 'none'`: no network, storage, cookies or parent access. Its only channel is the host's MessagePort.
@@ -140,7 +140,7 @@ A push that moves `main`:
 3. Tells the canvas, which moves every block following that module's head to the new version in place.
 4. Returns, with the results in the push output.
 
-The push doesn't return until this is done. Implemented. Planned: pushes to other branches publish branch versions to a preview canvas; merging into `main` publishes, and waits for approval if a module's `tools` grew.
+The push doesn't return until this is done. Implemented. Planned: pushes to other branches publish branch versions to a preview canvas; merging into `main` publishes.
 
 ### Checks
 

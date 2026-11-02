@@ -14,7 +14,7 @@ npm run smoke -w @mason/edge        # end-to-end checks against the running dev 
 The workspace repo has one file per module, plus an agent guide (`AGENTS.md`), SDK types and a starting layout:
 
 ```
-blocks/oncall-desk.tsx       export default Block.define({ id, tools, setup, view })
+blocks/oncall-desk.tsx       export default Block.define({ id, setup, view })
 blocks/escape-attempts.tsx
 AGENTS.md, CLAUDE.md         how to write blocks, the tools, the push output, the canvas API
 types/mason-sdk.d.ts         so `npx tsc -p .` checks blocks
@@ -52,7 +52,7 @@ curl -s -X POST localhost:8787/api/canvas/ops -d '{"type":"open","module":"ci-bo
 | Compiler (`worker/compile.ts`) | Sucrase in the Worker. Rejects imports other than `@mason/sdk`, pasted tokens, and modules that aren't a `Block.define`. Writes content-addressed server and client bundles to R2. |
 | View sandbox (`worker/pages.ts`, `frame/sdk.tsx`) | Real. `sandbox="allow-scripts"` iframe on a second origin (127.0.0.1 vs localhost), CSP `default-src 'none'; connect-src 'none'`, bundle loaded with an `integrity` hash, one MessagePort to the host. |
 | Postgres (`worker/registry-do.ts`) | Mock DO: module versions and heads, block records, the `block_subscriptions` topic index. |
-| MCP gateway + GitHub + Datadog (`worker/gateway-do.ts`) | Mock DO: checks each call against the block grant; fake PRs; a p95 metric that can only be polled. |
+| MCP gateway + GitHub + Datadog (`worker/gateway-do.ts`) | Mock DO: takes each call with the block's grant (block and principal); fake PRs; a p95 metric that can only be polled. |
 | Canvas DO (`worker/canvas-do.ts`) | Real. Block instances (module, head or pinned version, props, rect, z) and an op log; one hibernatable socket per viewer. Would also persist to Postgres. Each card still opens its own socket to its Block DO for data. |
 
 ## How a block runs
@@ -63,7 +63,7 @@ curl -s -X POST localhost:8787/api/canvas/ops -d '{"type":"open","module":"ci-bo
 - **Actions.** `block.action(name, tool, { invalidates, permission })`. `confirm` actions are refused without confirmation. The DO refetches what an action invalidates before acking, then fans the change out to other blocks.
 - **Agents.** Code: the git repo. Runtime: `GET /api/blocks/:id` returns the describe line, version and commit, and an outline of each query's tool, args, status and freshness.
 
-`blocks/escape-attempts.tsx` tries network, storage, the parent document and a tool outside its grant; the canvas shows each one blocked.
+`blocks/escape-attempts.tsx` tries network, storage, the parent document and a tool that doesn't exist; the canvas shows each one blocked.
 
 ## Known gaps
 

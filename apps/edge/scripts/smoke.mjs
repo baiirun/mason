@@ -45,7 +45,7 @@ check("isolate fetch() is blocked", web.sandbox.fetch.startsWith("blocked"), web
 
 const esc = await get("/api/blocks/escape");
 const secrets = esc.outline.find((q) => q.query === "secrets");
-check("gateway refuses a tool outside the block's grant", secrets?.status === "error" && /not allowed by block escape's grant/.test(secrets.error), secrets?.error);
+check("a tool that isn't in the catalog is refused", secrets?.status === "error" && /unknown tool github\.list_repo_secrets/.test(secrets.error), secrets?.error);
 // Regression: parallel fetches used to overwrite each other's cached rows.
 check("a failing query doesn't clobber its sibling", esc.outline.find((q) => q.query === "prs")?.status === "ready");
 

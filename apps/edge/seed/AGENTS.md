@@ -24,7 +24,6 @@ import { Block, Section, Table } from "@mason/sdk";
 
 export default Block.define<{ repo: string }>({
   id: "my-module",                       // match the filename
-  tools: ["github.list_pull_requests"],  // every tool the block calls; anything else is refused
 
   // Runs on the server, in a sandbox with no network. Declare data; don't fetch it.
   setup(block, ctx) {

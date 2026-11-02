@@ -75,13 +75,13 @@ export async function publishCommit(env: Env, repoName: string, from: string | n
 async function publishModule(env: Env, moduleId: string, source: string, commit: string) {
   const compiled = await compile(source, env.BUNDLES);
   const ev = await loadIsolate(env, compiled.server).evaluate({ props: {}, state: {}, values: {} });
-  if (!ev.id) throw new CompileError("the module must `export default Block.define({ id, tools, setup, view })`");
+  if (!ev.id) throw new CompileError("the module must `export default Block.define({ id, setup, view })`");
   const version: ModuleVersion = {
     id: `${moduleId}@${commit.slice(0, 7)}`,
     moduleId,
     commit,
     compiled,
-    manifest: { id: ev.id, tools: ev.tools, queries: ev.queries.map((q: any) => q.name), actions: ev.actions.map((a: any) => a.name) },
+    manifest: { id: ev.id, queries: ev.queries.map((q: any) => q.name), actions: ev.actions.map((a: any) => a.name) },
     createdAt: Date.now(),
   };
   const reg = registry(env);

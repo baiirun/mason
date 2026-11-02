@@ -65,5 +65,5 @@ export function evaluate(def, snap) {
   try { def.setup(block, { mcp: toolRefs }) } catch (e) { errors.push(`setup: ${e.message}`) }
   let describe = null;
   try { describe = describeFn ? String(describeFn()) : null } catch (e) { errors.push(`describe: ${e.message}`) }
-  return { id: def.id, tools: def.tools ?? [], queries, actions, describe, stateDefaults, errors };
+  return { id: def.id, queries, actions, describe, stateDefaults, errors };
 }

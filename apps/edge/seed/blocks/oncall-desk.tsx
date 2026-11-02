@@ -5,7 +5,6 @@ type Pr = { id: number; number: number; repo: string; title: string; author: str
 
 export default Block.define({
   id: "oncall-desk",
-  tools: ["github.list_pull_requests", "github.close_pull_request", "datadog.query_metrics"],
 
   setup(block: any, ctx: any) {
     const reviewer = block.state("reviewer", "byron");

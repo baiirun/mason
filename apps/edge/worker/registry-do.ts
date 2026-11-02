@@ -9,7 +9,7 @@ export interface ModuleVersion {
   moduleId: string;
   commit: string;
   compiled: Compiled;
-  manifest: { id: string; tools: string[]; queries: string[]; actions: string[] };
+  manifest: { id: string; queries: string[]; actions: string[] };
   createdAt: number;
 }
 
