@@ -1,0 +1,21 @@
+{
+  "name": "@mason/edge",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:frame": "node scripts/build-frame.mjs",
+    "dev": "npm run build:frame && wrangler dev --port 8787",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "dependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "sucrase": "3.35.1"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261015.1",
+    "esbuild": "*",
+    "wrangler": "4.150.0"
+  }
+}

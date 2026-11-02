@@ -1,0 +1,22 @@
+{
+  "name": "mason-edge",
+  "main": "worker/index.ts",
+  "compatibility_date": "2026-10-01",
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "r2_buckets": [{ "binding": "BUNDLES", "bucket_name": "mason-bundles" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "BLOCK", "class_name": "BlockDO" },
+      { "name": "REGISTRY", "class_name": "RegistryDO" },
+      { "name": "GATEWAY", "class_name": "GatewayDO" }
+    ]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["BlockDO", "RegistryDO", "GatewayDO"] }],
+  // Module source and the generated frame runtime are bundled into the worker as strings.
+  "rules": [{ "type": "Text", "globs": ["**/*.isolate.js", "**/generated/*.js", "**/examples/*.tsx"], "fallthrough": true }],
+  "vars": {
+    // Views load from a different origin than the canvas (127.0.0.1 vs localhost), like a real sandbox domain.
+    "FRAME_ORIGIN": "http://127.0.0.1:8787",
+    "APP_ORIGIN": "http://localhost:8787"
+  }
+}
